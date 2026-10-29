@@ -1,0 +1,381 @@
+"""
+Telegram-бот магазина: боты / номера / сайты.
+Библиотека: aiogram 3.x   ->   pip install aiogram
+Запуск:  python bot.py
+"""
+import asyncio
+import json
+import logging
+import os
+
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+# ======================= НАСТРОЙКИ (ВСТАВЬ СВОЁ) =======================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_ТОКЕН_ОТ_BOTFATHER")
+ADMIN_IDS = [5901469594]  # <-- твой Telegram ID (узнать: @userinfobot). Можно несколько через запятую
+DATA_FILE = "data.json"
+# =======================================================================
+
+DEFAULT_DATA = {
+    "welcome": (
+        "👋 <b>Добро пожаловать!</b>\n\n"
+        "Я — бот-магазин цифровых услуг. Что здесь можно купить:\n\n"
+        "🤖 <b>Telegram-боты</b> — под ключ, под твою задачу\n"
+        "📱 <b>Номера для Telegram</b> — быстро и надёжно\n"
+        "🌐 <b>Веб-сайты</b> — от лендинга до магазина\n\n"
+        "Выбери раздел ниже 👇"
+    ),
+    "about": (
+        "ℹ️ <b>О нашем магазине</b>\n\n"
+        "Мы делаем ботов для Telegram, продаём номера для Telegram "
+        "и создаём веб-сайты.\n\n"
+        "Как купить:\n"
+        "1️⃣ Выбери товар\n"
+        "2️⃣ Нажми «Оплатить»\n"
+        "3️⃣ Оплати и нажми «Я оплатил»\n"
+        "4️⃣ Мы свяжемся с тобой и выдадим заказ"
+    ),
+    "support": "@vermin222",
+    "pay_text": "Реквизиты для оплаты скоро появятся. Напиши в поддержку 💬",
+    "pay_url": "",  # ссылка на оплату (необязательно) — появится кнопка «Перейти к оплате»
+    "next_id": 4,
+    "products": [
+        {"id": 1, "emoji": "🤖", "title": "Telegram-боты",
+         "desc": "Создадим бота под твою задачу: магазин, поддержка, автоворонка, рассылки.",
+         "price": "от 1000 ₽"},
+        {"id": 2, "emoji": "📱", "title": "Номера для Telegram",
+         "desc": "Номера для регистрации аккаунтов Telegram. Выдача после оплаты.",
+         "price": "от 100 ₽"},
+        {"id": 3, "emoji": "🌐", "title": "Веб-сайты",
+         "desc": "Сайт под ключ: дизайн, вёрстка, адаптив под телефон.",
+         "price": "от 3000 ₽"},
+    ],
+    "users": [],
+}
+
+
+def load() -> dict:
+    if not os.path.exists(DATA_FILE):
+        save(DEFAULT_DATA)
+        return json.loads(json.dumps(DEFAULT_DATA))
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save(d: dict) -> None:
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+
+
+def find(d: dict, pid: int):
+    return next((p for p in d["products"] if p["id"] == pid), None)
+
+
+def support_url(d: dict) -> str:
+    return "https://t.me/" + d["support"].lstrip("@")
+
+
+def is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
+
+
+router = Router()
+
+
+class Edit(StatesGroup):
+    value = State()
+
+
+async def show(target, text: str, kb) -> None:
+    """Редактирует сообщение, а если нельзя — отправляет новое."""
+    msg = target.message if isinstance(target, CallbackQuery) else target
+    try:
+        if isinstance(target, CallbackQuery):
+            await msg.edit_text(text, reply_markup=kb)
+        else:
+            await msg.answer(text, reply_markup=kb)
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=kb)
+
+
+# ============================ ПОЛЬЗОВАТЕЛЬ ============================
+def main_kb(d: dict):
+    b = InlineKeyboardBuilder()
+    for p in d["products"]:
+        b.button(text=f"{p['emoji']} {p['title']} — {p['price']}", callback_data=f"p:{p['id']}")
+    b.button(text="ℹ️ О боте", callback_data="about")
+    b.button(text="💬 Поддержка", url=support_url(d))
+    b.adjust(1, 1, 1, 2)
+    return b.as_markup()
+
+
+@router.message(CommandStart())
+async def start(m: Message, state: FSMContext):
+    await state.clear()
+    d = load()
+    if m.from_user.id not in d["users"]:
+        d["users"].append(m.from_user.id)
+        save(d)
+    await m.answer(d["welcome"], reply_markup=main_kb(d))
+
+
+@router.callback_query(F.data == "home")
+async def home(c: CallbackQuery):
+    d = load()
+    await show(c, d["welcome"], main_kb(d))
+    await c.answer()
+
+
+@router.callback_query(F.data == "about")
+async def about(c: CallbackQuery):
+    d = load()
+    b = InlineKeyboardBuilder()
+    b.button(text="💬 Поддержка", url=support_url(d))
+    b.button(text="⬅️ Назад", callback_data="home")
+    b.adjust(1)
+    await show(c, d["about"], b.as_markup())
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("p:"))
+async def product(c: CallbackQuery):
+    d = load()
+    p = find(d, int(c.data.split(":")[1]))
+    if not p:
+        return await c.answer("Товар не найден", show_alert=True)
+    text = (f"{p['emoji']} <b>{p['title']}</b>\n\n{p['desc']}\n\n"
+            f"💰 Цена: <b>{p['price']}</b>")
+    b = InlineKeyboardBuilder()
+    b.button(text="💳 Оплатить", callback_data=f"pay:{p['id']}")
+    b.button(text="💬 Задать вопрос", url=support_url(d))
+    b.button(text="⬅️ Назад", callback_data="home")
+    b.adjust(1)
+    await show(c, text, b.as_markup())
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("pay:"))
+async def pay(c: CallbackQuery):
+    d = load()
+    p = find(d, int(c.data.split(":")[1]))
+    if not p:
+        return await c.answer("Товар не найден", show_alert=True)
+    text = (f"💳 <b>Оплата: {p['title']}</b>\n\n"
+            f"Сумма: <b>{p['price']}</b>\n\n{d['pay_text']}\n\n"
+            "После оплаты нажми «✅ Я оплатил».")
+    b = InlineKeyboardBuilder()
+    if d["pay_url"]:
+        b.button(text="🔗 Перейти к оплате", url=d["pay_url"])
+    b.button(text="✅ Я оплатил", callback_data=f"paid:{p['id']}")
+    b.button(text="💬 Поддержка", url=support_url(d))
+    b.button(text="⬅️ Назад", callback_data=f"p:{p['id']}")
+    b.adjust(1)
+    await show(c, text, b.as_markup())
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("paid:"))
+async def paid(c: CallbackQuery, bot: Bot):
+    d = load()
+    p = find(d, int(c.data.split(":")[1]))
+    if not p:
+        return await c.answer("Товар не найден", show_alert=True)
+    u = c.from_user
+    name = f"@{u.username}" if u.username else u.full_name
+    for aid in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                aid,
+                f"🛒 <b>Новая оплата!</b>\n\nТовар: {p['emoji']} {p['title']}\n"
+                f"Сумма: {p['price']}\nПокупатель: {name}\nID: <code>{u.id}</code>")
+        except Exception:
+            pass
+    b = InlineKeyboardBuilder()
+    b.button(text="💬 Написать в поддержку", url=support_url(d))
+    b.button(text="🏠 В меню", callback_data="home")
+    b.adjust(1)
+    await show(c, "✅ <b>Спасибо!</b>\n\nМы проверим оплату и скоро свяжемся с тобой.", b.as_markup())
+    await c.answer("Заявка отправлена")
+
+
+# ============================== АДМИНКА ==============================
+def admin_kb():
+    b = InlineKeyboardBuilder()
+    b.button(text="📦 Товары и цены", callback_data="adm:prods")
+    b.button(text="👋 Приветствие", callback_data="adm:set:welcome")
+    b.button(text="ℹ️ Текст «О боте»", callback_data="adm:set:about")
+    b.button(text="💳 Реквизиты оплаты", callback_data="adm:set:pay_text")
+    b.button(text="🔗 Ссылка на оплату", callback_data="adm:set:pay_url")
+    b.button(text="💬 Юзернейм поддержки", callback_data="adm:set:support")
+    b.button(text="📊 Статистика", callback_data="adm:stats")
+    b.adjust(1)
+    return b.as_markup()
+
+
+@router.message(Command("admin"))
+async def admin(m: Message, state: FSMContext):
+    if not is_admin(m.from_user.id):
+        return
+    await state.clear()
+    await m.answer("⚙️ <b>Админ-панель</b>", reply_markup=admin_kb())
+
+
+@router.callback_query(F.data == "adm:main")
+async def adm_main(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    await state.clear()
+    await show(c, "⚙️ <b>Админ-панель</b>", admin_kb())
+    await c.answer()
+
+
+@router.callback_query(F.data == "adm:stats")
+async def adm_stats(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    d = load()
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm:main")
+    await show(c, f"📊 Пользователей: <b>{len(d['users'])}</b>\n"
+                  f"📦 Товаров: <b>{len(d['products'])}</b>", b.as_markup())
+    await c.answer()
+
+
+@router.callback_query(F.data == "adm:prods")
+async def adm_prods(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    d = load()
+    b = InlineKeyboardBuilder()
+    for p in d["products"]:
+        b.button(text=f"{p['emoji']} {p['title']} — {p['price']}", callback_data=f"adm:p:{p['id']}")
+    b.button(text="➕ Добавить товар", callback_data="adm:add")
+    b.button(text="⬅️ Назад", callback_data="adm:main")
+    b.adjust(1)
+    await show(c, "📦 <b>Выбери товар для редактирования:</b>", b.as_markup())
+    await c.answer()
+
+
+@router.callback_query(F.data == "adm:add")
+async def adm_add(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    d = load()
+    pid = d["next_id"]
+    d["next_id"] += 1
+    d["products"].append({"id": pid, "emoji": "🛍", "title": "Новый товар",
+                          "desc": "Описание товара", "price": "0 ₽"})
+    save(d)
+    c.data = f"adm:p:{pid}"
+    await adm_product(c)
+
+
+@router.callback_query(F.data.startswith("adm:p:"))
+async def adm_product(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    d = load()
+    p = find(d, int(c.data.split(":")[2]))
+    if not p:
+        return await c.answer("Не найден", show_alert=True)
+    b = InlineKeyboardBuilder()
+    b.button(text="✏️ Название", callback_data=f"adm:e:{p['id']}:title")
+    b.button(text="💰 Цена", callback_data=f"adm:e:{p['id']}:price")
+    b.button(text="📝 Описание", callback_data=f"adm:e:{p['id']}:desc")
+    b.button(text="😀 Эмодзи", callback_data=f"adm:e:{p['id']}:emoji")
+    b.button(text="🗑 Удалить товар", callback_data=f"adm:del:{p['id']}")
+    b.button(text="⬅️ Назад", callback_data="adm:prods")
+    b.adjust(2, 2, 1, 1)
+    await show(c, f"{p['emoji']} <b>{p['title']}</b>\n\n{p['desc']}\n\n💰 {p['price']}", b.as_markup())
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("adm:del:"))
+async def adm_del(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    d = load()
+    pid = int(c.data.split(":")[2])
+    d["products"] = [p for p in d["products"] if p["id"] != pid]
+    save(d)
+    await c.answer("Удалено")
+    await adm_prods(c)
+
+
+LABELS = {"title": "новое название", "price": "новую цену (например: 1500 ₽)",
+          "desc": "новое описание", "emoji": "эмодзи", "welcome": "новый текст приветствия",
+          "about": "новый текст «О боте»", "pay_text": "реквизиты оплаты (карта, кошелёк, и т.д.)",
+          "pay_url": "ссылку на оплату (или «-» чтобы убрать)",
+          "support": "юзернейм поддержки (например @vermin222)"}
+
+
+@router.callback_query(F.data.startswith("adm:e:"))
+async def adm_edit_product(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    _, _, pid, field = c.data.split(":")
+    await state.set_state(Edit.value)
+    await state.update_data(kind="product", pid=int(pid), field=field)
+    await c.message.answer(f"Отправь {LABELS[field]} сообщением 👇\n(отмена: /admin)")
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("adm:set:"))
+async def adm_edit_setting(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    field = c.data.split(":")[2]
+    d = load()
+    await state.set_state(Edit.value)
+    await state.update_data(kind="setting", field=field)
+    cur = d.get(field) or "— пусто —"
+    await c.message.answer(f"Сейчас:\n\n{cur}\n\nОтправь {LABELS[field]} сообщением 👇\n(отмена: /admin)",
+                           parse_mode=None)
+    await c.answer()
+
+
+@router.message(StateFilter(Edit.value), F.text)
+async def adm_save(m: Message, state: FSMContext):
+    if not is_admin(m.from_user.id):
+        return
+    st = await state.get_data()
+    d = load()
+    value = m.html_text
+    if st["field"] == "pay_url":
+        value = "" if m.text.strip() == "-" else m.text.strip()
+    if st["field"] == "support":
+        value = m.text.strip()
+        if not value.startswith("@"):
+            value = "@" + value
+    if st["kind"] == "product":
+        p = find(d, st["pid"])
+        if p:
+            p[st["field"]] = value
+    else:
+        d[st["field"]] = value
+    save(d)
+    await state.clear()
+    await m.answer("✅ Сохранено!", reply_markup=admin_kb())
+
+
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    load()
+    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
