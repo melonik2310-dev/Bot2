@@ -16,7 +16,7 @@ from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ======================= НАСТРОЙКИ (ВСТАВЬ СВОЁ) =======================
@@ -52,7 +52,7 @@ DEFAULT_DATA = {
         {"id": 1, "emoji": "🤖", "title": "Telegram-боты",
          "desc": "Создадим бота под твою задачу: магазин, поддержка, автоворонка, рассылки.",
          "price": "от 1000 ₽"},
-        {"id": 2, "emoji": "📱", "title": "Номера для Telegram",
+        {"id": 2, "kind": "numbers", "emoji": "📱", "title": "Номера для Telegram",
          "desc": "Номера для регистрации аккаунтов Telegram. Выдача после оплаты.",
          "price": "от 100 ₽"},
         {"id": 3, "emoji": "🌐", "title": "Веб-сайты",
@@ -60,6 +60,17 @@ DEFAULT_DATA = {
          "price": "от 3000 ₽"},
     ],
     "users": [],
+    # Наценка (%) к базовой цене номеров. Цена клиента = база + наценка
+    "markup": 15,
+    # base = цена у поставщика (lizmarket) в ₽. ЗАМЕНИ на реальные в /admin
+    "countries": [
+        {"id": 1, "flag": "🇷🇺", "name": "Россия", "base": 100},
+        {"id": 2, "flag": "🇰🇿", "name": "Казахстан", "base": 100},
+        {"id": 3, "flag": "🇺🇦", "name": "Украина", "base": 100},
+        {"id": 4, "flag": "🇺🇸", "name": "США", "base": 100},
+        {"id": 5, "flag": "🇬🇧", "name": "Великобритания", "base": 100},
+        {"id": 6, "flag": "🇮🇩", "name": "Индонезия", "base": 100},
+    ],
 }
 
 
@@ -68,7 +79,14 @@ def load() -> dict:
         save(DEFAULT_DATA)
         return json.loads(json.dumps(DEFAULT_DATA))
     with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        d = json.load(f)
+    for k in ("markup", "countries"):
+        if k not in d:
+            d[k] = json.loads(json.dumps(DEFAULT_DATA[k]))
+    for p in d["products"]:
+        if p["id"] == 2 and "kind" not in p:
+            p["kind"] = "numbers"
+    return d
 
 
 def save(d: dict) -> None:
@@ -78,6 +96,23 @@ def save(d: dict) -> None:
 
 def find(d: dict, pid: int):
     return next((p for p in d["products"] if p["id"] == pid), None)
+
+
+def cprice(d: dict, c: dict) -> str:
+    return f"{round(c['base'] * (1 + float(d['markup']) / 100))} ₽"
+
+
+def get_item(d: dict, kind: str, iid: int):
+    """Возвращает (название, цена, куда_назад) для товара или страны."""
+    if kind == "c":
+        c = next((x for x in d["countries"] if x["id"] == iid), None)
+        if c:
+            return f"Номер {c['flag']} {c['name']}", cprice(d, c), f"c:{iid}"
+    else:
+        p = find(d, iid)
+        if p:
+            return f"{p['emoji']} {p['title']}", p["price"], f"p:{iid}"
+    return None
 
 
 def support_url(d: dict) -> str:
@@ -155,9 +190,41 @@ async def product(c: CallbackQuery):
     text = (f"{p['emoji']} <b>{p['title']}</b>\n\n{p['desc']}\n\n"
             f"💰 Цена: <b>{p['price']}</b>")
     b = InlineKeyboardBuilder()
-    b.button(text="💳 Оплатить", callback_data=f"pay:{p['id']}")
+    if p.get("kind") == "numbers":
+        b.button(text="🌍 Выбрать страну", callback_data="nums")
+    else:
+        b.button(text="💳 Оплатить", callback_data=f"pay:p:{p['id']}")
     b.button(text="💬 Задать вопрос", url=support_url(d))
     b.button(text="⬅️ Назад", callback_data="home")
+    b.adjust(1)
+    await show(c, text, b.as_markup())
+    await c.answer()
+
+
+@router.callback_query(F.data == "nums")
+async def nums(c: CallbackQuery):
+    d = load()
+    b = InlineKeyboardBuilder()
+    for x in d["countries"]:
+        b.button(text=f"{x['flag']} {x['name']} — {cprice(d, x)}", callback_data=f"c:{x['id']}")
+    b.adjust(2)
+    b.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="p:2"))
+    await show(c, "🌍 <b>Выбери страну номера:</b>\n\nЦена указана за 1 номер.", b.as_markup())
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("c:"))
+async def country(c: CallbackQuery):
+    d = load()
+    x = next((i for i in d["countries"] if i["id"] == int(c.data.split(":")[1])), None)
+    if not x:
+        return await c.answer("Страна не найдена", show_alert=True)
+    text = (f"{x['flag']} <b>Номер Telegram — {x['name']}</b>\n\n"
+            f"💰 Цена: <b>{cprice(d, x)}</b>\n\nНомер выдаётся после оплаты.")
+    b = InlineKeyboardBuilder()
+    b.button(text="💳 Оплатить", callback_data=f"pay:c:{x['id']}")
+    b.button(text="💬 Задать вопрос", url=support_url(d))
+    b.button(text="⬅️ К списку стран", callback_data="nums")
     b.adjust(1)
     await show(c, text, b.as_markup())
     await c.answer()
@@ -166,18 +233,20 @@ async def product(c: CallbackQuery):
 @router.callback_query(F.data.startswith("pay:"))
 async def pay(c: CallbackQuery):
     d = load()
-    p = find(d, int(c.data.split(":")[1]))
-    if not p:
-        return await c.answer("Товар не найден", show_alert=True)
-    text = (f"💳 <b>Оплата: {p['title']}</b>\n\n"
-            f"Сумма: <b>{p['price']}</b>\n\n{d['pay_text']}\n\n"
+    _, kind, iid = c.data.split(":")
+    item = get_item(d, kind, int(iid))
+    if not item:
+        return await c.answer("Не найдено", show_alert=True)
+    title, price, back = item
+    text = (f"💳 <b>Оплата: {title}</b>\n\n"
+            f"Сумма: <b>{price}</b>\n\n{d['pay_text']}\n\n"
             "После оплаты нажми «✅ Я оплатил».")
     b = InlineKeyboardBuilder()
     if d["pay_url"]:
         b.button(text="🔗 Перейти к оплате", url=d["pay_url"])
-    b.button(text="✅ Я оплатил", callback_data=f"paid:{p['id']}")
+    b.button(text="✅ Я оплатил", callback_data=f"paid:{kind}:{iid}")
     b.button(text="💬 Поддержка", url=support_url(d))
-    b.button(text="⬅️ Назад", callback_data=f"p:{p['id']}")
+    b.button(text="⬅️ Назад", callback_data=back)
     b.adjust(1)
     await show(c, text, b.as_markup())
     await c.answer()
@@ -186,17 +255,19 @@ async def pay(c: CallbackQuery):
 @router.callback_query(F.data.startswith("paid:"))
 async def paid(c: CallbackQuery, bot: Bot):
     d = load()
-    p = find(d, int(c.data.split(":")[1]))
-    if not p:
-        return await c.answer("Товар не найден", show_alert=True)
+    _, kind, iid = c.data.split(":")
+    item = get_item(d, kind, int(iid))
+    if not item:
+        return await c.answer("Не найдено", show_alert=True)
+    title, price, _ = item
     u = c.from_user
     name = f"@{u.username}" if u.username else u.full_name
     for aid in ADMIN_IDS:
         try:
             await bot.send_message(
                 aid,
-                f"🛒 <b>Новая оплата!</b>\n\nТовар: {p['emoji']} {p['title']}\n"
-                f"Сумма: {p['price']}\nПокупатель: {name}\nID: <code>{u.id}</code>")
+                f"🛒 <b>Новая оплата!</b>\n\nТовар: {title}\n"
+                f"Сумма: {price}\nПокупатель: {name}\nID: <code>{u.id}</code>")
         except Exception:
             pass
     b = InlineKeyboardBuilder()
@@ -211,6 +282,8 @@ async def paid(c: CallbackQuery, bot: Bot):
 def admin_kb():
     b = InlineKeyboardBuilder()
     b.button(text="📦 Товары и цены", callback_data="adm:prods")
+    b.button(text="🌍 Страны номеров", callback_data="adm:cs")
+    b.button(text="📈 Наценка на номера (%)", callback_data="adm:set:markup")
     b.button(text="👋 Приветствие", callback_data="adm:set:welcome")
     b.button(text="ℹ️ Текст «О боте»", callback_data="adm:set:about")
     b.button(text="💳 Реквизиты оплаты", callback_data="adm:set:pay_text")
@@ -311,7 +384,82 @@ async def adm_del(c: CallbackQuery):
     await adm_prods(c)
 
 
-LABELS = {"title": "новое название", "price": "новую цену (например: 1500 ₽)",
+@router.callback_query(F.data == "adm:cs")
+async def adm_cs(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    d = load()
+    b = InlineKeyboardBuilder()
+    for x in d["countries"]:
+        b.button(text=f"{x['flag']} {x['name']} — база {x['base']} ₽ → {cprice(d, x)}",
+                 callback_data=f"adm:c:{x['id']}")
+    b.button(text="➕ Добавить страну", callback_data="adm:cadd")
+    b.button(text="⬅️ Назад", callback_data="adm:main")
+    b.adjust(1)
+    await show(c, f"🌍 <b>Страны номеров</b>\nНаценка: <b>{d['markup']}%</b>\n\n"
+                  "«база» — цена у поставщика, после стрелки — цена для клиента.", b.as_markup())
+    await c.answer()
+
+
+@router.callback_query(F.data == "adm:cadd")
+async def adm_cadd(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    d = load()
+    cid = max([x["id"] for x in d["countries"]] + [0]) + 1
+    d["countries"].append({"id": cid, "flag": "🏳️", "name": "Новая страна", "base": 100})
+    save(d)
+    c.data = f"adm:c:{cid}"
+    await adm_country(c)
+
+
+@router.callback_query(F.data.startswith("adm:c:"))
+async def adm_country(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    d = load()
+    cid = int(c.data.split(":")[2])
+    x = next((i for i in d["countries"] if i["id"] == cid), None)
+    if not x:
+        return await c.answer("Не найдена", show_alert=True)
+    b = InlineKeyboardBuilder()
+    b.button(text="✏️ Название", callback_data=f"adm:ce:{cid}:name")
+    b.button(text="💰 Базовая цена", callback_data=f"adm:ce:{cid}:base")
+    b.button(text="🏳️ Флаг", callback_data=f"adm:ce:{cid}:flag")
+    b.button(text="🗑 Удалить", callback_data=f"adm:cdel:{cid}")
+    b.button(text="⬅️ Назад", callback_data="adm:cs")
+    b.adjust(2, 2, 1)
+    await show(c, f"{x['flag']} <b>{x['name']}</b>\nБаза: {x['base']} ₽\n"
+                  f"Цена для клиента: <b>{cprice(d, x)}</b> (наценка {d['markup']}%)", b.as_markup())
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("adm:cdel:"))
+async def adm_cdel(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    d = load()
+    cid = int(c.data.split(":")[2])
+    d["countries"] = [x for x in d["countries"] if x["id"] != cid]
+    save(d)
+    await c.answer("Удалено")
+    await adm_cs(c)
+
+
+@router.callback_query(F.data.startswith("adm:ce:"))
+async def adm_edit_country(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer()
+    _, _, cid, field = c.data.split(":")
+    await state.set_state(Edit.value)
+    await state.update_data(kind="country", pid=int(cid), field=field)
+    await c.message.answer(f"Отправь {LABELS[field]} сообщением 👇\n(отмена: /admin)")
+    await c.answer()
+
+
+LABELS = {"name": "название страны", "flag": "эмодзи-флаг (например 🇰🇿)",
+          "base": "базовую цену номера в ₽ (цена у поставщика, например 80)",
+          "markup": "наценку в процентах (например 20)", "title": "новое название", "price": "новую цену (например: 1500 ₽)",
           "desc": "новое описание", "emoji": "эмодзи", "welcome": "новый текст приветствия",
           "about": "новый текст «О боте»", "pay_text": "реквизиты оплаты (карта, кошелёк, и т.д.)",
           "pay_url": "ссылку на оплату (или «-» чтобы убрать)",
@@ -349,19 +497,31 @@ async def adm_save(m: Message, state: FSMContext):
         return
     st = await state.get_data()
     d = load()
+    field = st["field"]
     value = m.html_text
-    if st["field"] == "pay_url":
+    if field == "pay_url":
         value = "" if m.text.strip() == "-" else m.text.strip()
-    if st["field"] == "support":
+    elif field == "support":
         value = m.text.strip()
         if not value.startswith("@"):
             value = "@" + value
+    elif field in ("base", "markup"):
+        try:
+            value = float(m.text.replace(",", ".").strip())
+        except ValueError:
+            return await m.answer("⚠️ Нужно число, например 120. Попробуй ещё раз.")
+        if value.is_integer():
+            value = int(value)
     if st["kind"] == "product":
         p = find(d, st["pid"])
         if p:
-            p[st["field"]] = value
+            p[field] = value
+    elif st["kind"] == "country":
+        x = next((i for i in d["countries"] if i["id"] == st["pid"]), None)
+        if x:
+            x[field] = value
     else:
-        d[st["field"]] = value
+        d[field] = value
     save(d)
     await state.clear()
     await m.answer("✅ Сохранено!", reply_markup=admin_kb())
